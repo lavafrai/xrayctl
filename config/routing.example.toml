@@ -1,0 +1,23 @@
+domain_strategy = "AsIs"
+default_outbound = "proxy"
+
+[[rules]]
+name = "private-ip-direct"
+ip = ["geoip:private"]
+outbound = "direct"
+
+[[rules]]
+name = "private-domain-direct"
+domain = ["geosite:private"]
+outbound = "direct"
+
+[[rules]]
+name = "ads-block"
+enabled = false
+domain = ["geosite:category-ads-all"]
+outbound = "block"
+
+[[rules]]
+name = "torrent-direct"
+protocol = ["bittorrent"]
+outbound = "direct"

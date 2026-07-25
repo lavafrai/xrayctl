@@ -1,0 +1,69 @@
+[general]
+keep_generations = 3
+keep_core_versions = 2
+keep_asset_generations = 2
+connect_timeout_seconds = 8
+request_timeout_seconds = 20
+max_subscription_size_mb = 20
+max_core_archive_size_mb = 150
+max_asset_size_mb = 200
+healthcheck_url = "https://www.gstatic.com/generate_204"
+
+[core]
+repository = "XTLS/Xray-core"
+channel = "stable"
+pinned_version = ""
+
+[proxy]
+listen = "127.0.0.1"
+socks_port = 10808
+http_port = 10809
+udp = true
+sniffing = true
+
+[dns]
+mode = "system"
+tun_servers = ["1.1.1.1", "8.8.8.8"]
+query_strategy = "UseIP"
+
+[tun]
+enabled = true
+interface_name = "xray0"
+mtu = 1500
+ipv4_gateway = "172.31.255.1/30"
+ipv6_enabled = false
+routing_table = 166
+packet_mark = 102
+bypass_private_networks = true
+fail_closed = true
+override_resolv_conf_for_apps = true
+
+[menu]
+probe_on_open = true
+probe_concurrency = 4
+probe_timeout_seconds = 8
+latency_green_ms = 200
+latency_yellow_ms = 500
+
+[platform]
+layout = "auto"
+installer = "auto"
+identity = "auto"
+service = "auto"
+firewall = "auto"
+policy_routing = "auto"
+tun = "auto"
+app_runner = "auto"
+mount_isolation = "auto"
+desktop_proxy = "auto"
+package_advisor = "auto"
+
+[[assets]]
+id = "geoip"
+filename = "geoip.dat"
+url = "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
+
+[[assets]]
+id = "geosite"
+filename = "geosite.dat"
+url = "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"

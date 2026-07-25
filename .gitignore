@@ -1,0 +1,4 @@
+/target
+/.xray-manager/
+*.tmp
+*.new
