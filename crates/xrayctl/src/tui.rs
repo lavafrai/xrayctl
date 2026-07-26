@@ -7,7 +7,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use std::io::{self, Stdout};
 use std::sync::Arc;
@@ -166,6 +166,7 @@ async fn event_loop(
         ..TuiModel::default()
     };
     let mut filter_mode = false;
+    let mut notice: Option<(Color, String)> = None;
     if probe_on_open {
         for row in &mut model.nodes {
             if !row.id.is_empty() {
@@ -174,7 +175,19 @@ async fn event_loop(
         }
     }
     let mut probe_session = if probe_on_open {
-        Some(service.start_node_probes().await?)
+        match service.start_node_probes().await {
+            Ok(session) => Some(session),
+            Err(error) => {
+                notice = Some((
+                    Color::Red,
+                    format!(
+                        "Could not start probes: {}",
+                        compact_error(&error.to_string())
+                    ),
+                ));
+                None
+            }
+        }
     } else {
         None
     };
@@ -190,16 +203,25 @@ async fn event_loop(
         terminal.draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(5), Constraint::Min(3)])
+                .constraints([Constraint::Length(7), Constraint::Min(3)])
                 .split(frame.area());
+            let notice_line = notice.as_ref().map_or_else(
+                || Line::from("Ready"),
+                |(color, message)| Line::from(Span::styled(message, Style::default().fg(*color))),
+            );
             frame.render_widget(
                 Paragraph::new(vec![
-                    Line::from("xray-manager"),
+                    Line::from(Span::styled(
+                        "xray-manager",
+                        Style::default().fg(Color::Cyan),
+                    )),
                     Line::from(format!(
                         "Active node: {}",
                         active_node.as_deref().unwrap_or("none")
                     )),
                     Line::from("Enter: select  r: probe  /: filter  s: sort  q: quit"),
+                    Line::from(format!("Manager log: {}", manager_log_hint())),
+                    notice_line,
                 ])
                 .block(Block::default().borders(Borders::ALL).title("Status")),
                 chunks[0],
@@ -227,8 +249,11 @@ async fn event_loop(
                         }
                     };
                     ListItem::new(format!(
-                        "{}  {}  {}  {:?}",
-                        row.subscription, row.protocol, row.name, row.state
+                        "{}  {}  {}  {}",
+                        row.subscription,
+                        row.protocol,
+                        row.name,
+                        probe_label(&row.state)
                     ))
                     .style(Style::default().fg(color))
                 })
@@ -283,7 +308,13 @@ async fn event_loop(
                     }
                 }
                 KeyCode::Char('s') => model.sort_by_latency(),
-                KeyCode::Char('/') => filter_mode = true,
+                KeyCode::Char('/') => {
+                    filter_mode = true;
+                    notice = Some((
+                        Color::Blue,
+                        "Filter mode: type text, Enter to finish".into(),
+                    ));
+                }
                 KeyCode::Char('r') => {
                     if let Some(session) = probe_session.take() {
                         session.cancel();
@@ -293,19 +324,65 @@ async fn event_loop(
                             row.state = ProbeState::Running;
                         }
                     }
-                    probe_session = Some(service.start_node_probes().await?);
+                    match service.start_node_probes().await {
+                        Ok(session) => {
+                            probe_session = Some(session);
+                            notice = Some((Color::Blue, "Probing nodes…".into()));
+                        }
+                        Err(error) => {
+                            for row in &mut model.nodes {
+                                if matches!(row.state, ProbeState::Running) {
+                                    row.state = ProbeState::Failed("probe unavailable".into());
+                                }
+                            }
+                            notice = Some((
+                                Color::Red,
+                                format!(
+                                    "Could not start probes: {}",
+                                    compact_error(&error.to_string())
+                                ),
+                            ));
+                        }
+                    }
                 }
                 KeyCode::Enter => {
-                    if let Some(row) = model.nodes.get(model.selected)
-                        && !row.id.is_empty()
-                    {
-                        service
-                            .execute(
-                                Operation::NodeSelect { id: row.id.clone() },
-                                OperationOptions::default(),
-                            )
-                            .await?;
-                        active_node = Some(row.id.clone());
+                    if let Some(row) = model.nodes.get(model.selected) {
+                        let id = row.id.clone();
+                        let name = row.name.clone();
+                        let unsupported = row.unsupported;
+                        if id.is_empty() {
+                            notice = Some((Color::Yellow, "No node is available to select".into()));
+                        } else if unsupported {
+                            notice = Some((
+                                Color::Yellow,
+                                format!("{name} is not supported by the current Xray adapter"),
+                            ));
+                        } else {
+                            match service
+                                .execute(
+                                    Operation::NodeSelect { id: id.clone() },
+                                    OperationOptions::default(),
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    active_node = Some(id);
+                                    notice = Some((
+                                        Color::Green,
+                                        format!("Activated {name} successfully"),
+                                    ));
+                                }
+                                Err(error) => {
+                                    notice = Some((
+                                        Color::Red,
+                                        format!(
+                                            "Activation failed: {}",
+                                            compact_error(&error.to_string())
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 KeyCode::Down => model.move_selection(1),
@@ -318,6 +395,34 @@ async fn event_loop(
         session.cancel();
     }
     Ok(())
+}
+
+fn manager_log_hint() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "/var/log/xray-manager/xrayctl.log"
+    } else {
+        ".xray-manager/logs/xrayctl.log"
+    }
+}
+
+fn probe_label(state: &ProbeState) -> String {
+    match state {
+        ProbeState::Pending => "not probed".into(),
+        ProbeState::Running => "probing…".into(),
+        ProbeState::Succeeded(latency) => format!("{latency} ms"),
+        ProbeState::Failed(_) => "failed".into(),
+        ProbeState::Cancelled => "cancelled".into(),
+    }
+}
+
+fn compact_error(error: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let mut compact = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > MAX_CHARS {
+        compact = compact.chars().take(MAX_CHARS - 1).collect();
+        compact.push('…');
+    }
+    compact
 }
 
 fn apply_probe_result(model: &mut TuiModel, outcome: xray_manager_core::probe::NodeProbeOutcome) {

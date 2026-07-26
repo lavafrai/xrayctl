@@ -56,6 +56,7 @@ ip route show table 166 | grep -q blackhole
 ip -6 route show table 166 | grep -q unreachable
 test "$(stat -c '%a:%U:%G' /etc/xray-manager/config.toml)" = "640:root:xray-manager"
 test "$(stat -c '%a:%U:%G' /etc/xray-manager/subscriptions.d)" = "700:root:root"
+test "$(stat -c '%a:%U:%G' /var/log/xray-manager)" = "2750:root:xray-manager"
 systemctl is-active --quiet NetworkManager
 
 echo "Diagnostics"

@@ -442,6 +442,45 @@ fn hysteria_renderer_maps_confirmed_finalmask_fields() {
 }
 
 #[test]
+fn hysteria_renderer_accepts_standard_fm_json() {
+    let config = ManagerConfig::default();
+    let routing = RoutingConfig::preset("global-proxy").expect("preset");
+    let node = parse_uri(
+        "hysteria2://secret@hy.example:443?sni=cdn.example&fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22salamander%22%2C%22settings%22%3A%7B%22password%22%3A%22mask%22%7D%7D%5D%2C%22quicParams%22%3A%7B%22congestion%22%3A%22bbr%22%7D%7D&obfs=salamander&obfs-password=mask#HY2",
+        "main",
+    )
+    .expect("Hysteria2 fm should parse");
+    assert!(node.warnings.is_empty());
+    let files = render_xray_config(&config, Some(&node), &routing, vec![])
+        .expect("Hysteria2 fm should render");
+    let stream = &files["30_outbounds.json"]["outbounds"][0]["streamSettings"];
+    assert_eq!(stream["finalmask"]["udp"][0]["type"], "salamander");
+    assert_eq!(stream["finalmask"]["udp"].as_array().map(Vec::len), Some(1));
+    assert_eq!(stream["finalmask"]["quicParams"]["congestion"], "bbr");
+}
+
+#[test]
+fn vless_legacy_fragment_is_mapped_to_finalmask() {
+    let config = ManagerConfig::default();
+    let routing = RoutingConfig::preset("global-proxy").expect("preset");
+    let node = parse_uri(
+        &format!(
+            "vless://{UUID}@example.com:443?type=xhttp&security=tls&fragment=1-2%2C3-4%2Ctlshello"
+        ),
+        "main",
+    )
+    .expect("VLESS fragment should parse");
+    assert!(node.warnings.is_empty());
+    let files = render_xray_config(&config, Some(&node), &routing, vec![])
+        .expect("VLESS fragment should render");
+    let settings = &files["30_outbounds.json"]["outbounds"][0]["streamSettings"]["finalmask"]["tcp"]
+        [0]["settings"];
+    assert_eq!(settings["length"], "1-2");
+    assert_eq!(settings["delay"], "3-4");
+    assert_eq!(settings["packets"], "tlshello");
+}
+
+#[test]
 fn hysteria_renderer_refuses_unknown_fields() {
     let config = ManagerConfig::default();
     let routing = RoutingConfig::preset("global-proxy").expect("preset");

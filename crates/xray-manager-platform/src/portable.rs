@@ -647,19 +647,34 @@ impl XrayRunner for ProcessXrayRunner {
     }
 
     async fn test_config(&self, request: &XrayTestRequest) -> Result<()> {
+        // Xray's `run -test` still initializes TUN inbounds. During an ordinary
+        // node switch the active service already owns that interface, so testing
+        // the unmodified candidate would reject every otherwise-valid config.
+        // The committed generation is not changed: only this disposable
+        // validation copy omits TUN, while the subsequent service restart and
+        // healthcheck validate the real runtime configuration.
+        let validation = prepare_xray_validation_config(&request.config_dir)?;
         let output = Command::new(&request.executable)
             .env("XRAY_LOCATION_ASSET", &request.asset_dir)
             .args(["run", "-test", "-confdir"])
-            .arg(&request.config_dir)
+            .arg(validation.path())
             .output()
             .await
             .map_err(|error| ManagerError::Io(error.to_string()))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(ManagerError::Validation(
-                "Xray rejected the candidate configuration".into(),
-            ))
+            let diagnostic = sanitize_xray_diagnostic(&output.stderr);
+            tracing::warn!(
+                target: "xray_manager_platform::xray",
+                status = ?output.status.code(),
+                diagnostic = %diagnostic,
+                "Xray rejected candidate configuration"
+            );
+            Err(ManagerError::Validation(format!(
+                "Xray rejected the candidate configuration ({diagnostic}); \
+                     run xrayctl --verbose doctor for manager diagnostics"
+            )))
         }
     }
 
@@ -745,6 +760,9 @@ async fn probe_with_temporary_xray(node: &Node, config: &ManagerConfig) -> Resul
         .env("XRAY_LOCATION_ASSET", "/opt/xray-manager/assets/current")
         .args(["run", "-confdir"])
         .arg(temporary.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| ManagerError::Io(error.to_string()))?;
@@ -805,6 +823,74 @@ async fn probe_with_temporary_xray(node: &Node, config: &ManagerConfig) -> Resul
     }
 }
 
+fn prepare_xray_validation_config(config_dir: &Path) -> Result<tempfile::TempDir> {
+    let temporary = tempfile::tempdir().map_err(|error| ManagerError::Io(error.to_string()))?;
+    let entries = fs::read_dir(config_dir).map_err(|error| ManagerError::Io(error.to_string()))?;
+    let mut removed_tun_inbounds = 0usize;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| ManagerError::Io(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ManagerError::Io(error.to_string()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let source = entry.path();
+        let destination = temporary.path().join(entry.file_name());
+        if source.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
+            fs::copy(&source, &destination).map_err(|error| ManagerError::Io(error.to_string()))?;
+            continue;
+        }
+
+        let bytes = fs::read(&source).map_err(|error| ManagerError::Io(error.to_string()))?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| ManagerError::InvalidConfig(error.to_string()))?;
+        if let Some(inbounds) = value
+            .get_mut("inbounds")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let original_len = inbounds.len();
+            inbounds.retain(|inbound| {
+                inbound.get("protocol").and_then(serde_json::Value::as_str) != Some("tun")
+            });
+            removed_tun_inbounds += original_len.saturating_sub(inbounds.len());
+        }
+        let bytes = serde_json::to_vec_pretty(&value)
+            .map_err(|error| ManagerError::InvalidConfig(error.to_string()))?;
+        fs::write(destination, bytes).map_err(|error| ManagerError::Io(error.to_string()))?;
+    }
+
+    tracing::debug!(
+        removed_tun_inbounds,
+        "prepared side-effect-free Xray validation configuration"
+    );
+    Ok(temporary)
+}
+
+fn sanitize_xray_diagnostic(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let last_line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no diagnostic was returned");
+    let mut sanitized = last_line
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                "[redacted-uri]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    sanitized.truncate(512);
+    sanitized
+}
+
 #[cfg(target_os = "linux")]
 async fn terminate_child(child: &mut tokio::process::Child) {
     if let Some(id) = child.id() {
@@ -825,6 +911,55 @@ async fn terminate_child(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validation_copy_removes_only_tun_inbounds() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("20_inbounds.json"),
+            serde_json::to_vec(&json!({
+                "inbounds": [
+                    {"tag": "socks-in", "protocol": "socks"},
+                    {"tag": "tun-in", "protocol": "tun"},
+                    {"tag": "http-in", "protocol": "http"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("30_outbounds.json"),
+            serde_json::to_vec(&json!({"outbounds": [{"protocol": "vless"}]})).unwrap(),
+        )
+        .unwrap();
+
+        let validation = prepare_xray_validation_config(source.path()).unwrap();
+        let inbounds: serde_json::Value =
+            serde_json::from_slice(&fs::read(validation.path().join("20_inbounds.json")).unwrap())
+                .unwrap();
+        let protocols: Vec<&str> = inbounds["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|inbound| inbound["protocol"].as_str())
+            .collect();
+        assert_eq!(protocols, ["socks", "http"]);
+
+        let outbounds: serde_json::Value =
+            serde_json::from_slice(&fs::read(validation.path().join("30_outbounds.json")).unwrap())
+                .unwrap();
+        assert_eq!(outbounds["outbounds"][0]["protocol"], "vless");
+    }
+
+    #[test]
+    fn xray_diagnostic_redacts_uri_tokens_and_is_bounded() {
+        let diagnostic = sanitize_xray_diagnostic(
+            b"first line\nfailed to use vless://sensitive@example.invalid:443/path\n",
+        );
+        assert_eq!(diagnostic, "failed to use [redacted-uri]");
+        assert!(diagnostic.len() <= 512);
+    }
 
     #[tokio::test]
     async fn atomic_write_replaces_existing_file() {

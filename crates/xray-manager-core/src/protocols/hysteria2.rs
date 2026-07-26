@@ -25,6 +25,7 @@ pub fn parse_hysteria2(uri: &str, subscription: &str) -> Result<Node> {
         "mport",
         "upmbps",
         "downmbps",
+        "fm",
     ]
     .into_iter()
     .collect();
@@ -35,6 +36,14 @@ pub fn parse_hysteria2(uri: &str, subscription: &str) -> Result<Node> {
         .collect();
     if query.get("obfs").is_some_and(|value| value != "salamander") {
         warnings.push("unsupported Hysteria2 obfs".into());
+    }
+    if let Some(finalmask) = query.get("fm")
+        && !matches!(
+            serde_json::from_str::<serde_json::Value>(finalmask),
+            Ok(serde_json::Value::Object(_))
+        )
+    {
+        warnings.push("Hysteria2 fm must be a JSON object".into());
     }
     let mut extra = BTreeMap::new();
     for (key, value) in &query {

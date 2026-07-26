@@ -1102,6 +1102,7 @@ impl ArchInstaller {
                 "/etc/xray-manager".into(),
                 "/var/lib/xray-manager".into(),
                 "/var/cache/xray-manager".into(),
+                "/var/log/xray-manager".into(),
             ],
         )
         .await?;
@@ -1123,6 +1124,7 @@ impl ArchInstaller {
             "/etc/xray-manager/fragments.d",
             "/var/lib/xray-manager",
             "/var/cache/xray-manager",
+            "/var/log/xray-manager",
         ] {
             if Path::new(directory).exists() {
                 std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o2750))
@@ -1197,6 +1199,7 @@ impl ArchInstaller {
                 "/etc/xray-manager",
                 "/var/lib/xray-manager",
                 "/var/cache/xray-manager",
+                "/var/log/xray-manager",
                 "/opt/xray-manager",
             ] {
                 match std::fs::remove_dir_all(path) {
@@ -1302,6 +1305,10 @@ impl PlatformInstaller for ArchInstaller {
                 },
                 PlanAction::EnsureDirectory {
                     path: "/var/cache/xray-manager/downloads".into(),
+                    mode: 0o2750,
+                },
+                PlanAction::EnsureDirectory {
+                    path: "/var/log/xray-manager".into(),
                     mode: 0o2750,
                 },
                 PlanAction::EnsureDirectory {
@@ -1441,6 +1448,7 @@ impl PlatformInstaller for ArchInstaller {
                     "/etc/xray-manager",
                     "/var/lib/xray-manager",
                     "/var/cache/xray-manager",
+                    "/var/log/xray-manager",
                     "/opt/xray-manager",
                 ]
                 .into_iter()
@@ -1619,6 +1627,13 @@ mod tests {
                 action,
                 PlanAction::EnsureDirectory { path, mode }
                     if path == Path::new("/etc/xray-manager") && *mode == 0o2750
+            )
+        }));
+        assert!(plan.actions.iter().any(|action| {
+            matches!(
+                action,
+                PlanAction::EnsureDirectory { path, mode }
+                    if path == Path::new("/var/log/xray-manager") && *mode == 0o2750
             )
         }));
     }

@@ -169,40 +169,6 @@ fn render_proxy_outbound(node: &Node) -> Result<Value> {
                 "version": 2,
                 "auth": required(password, "Hysteria2 auth")?
             });
-            let mut finalmask = serde_json::Map::new();
-            if node
-                .extra
-                .get("obfs")
-                .is_some_and(|value| value == "salamander")
-            {
-                let obfs_password = node
-                    .extra
-                    .get("obfs-password")
-                    .ok_or_else(|| ManagerError::Validation("missing obfs-password".into()))?;
-                finalmask.insert(
-                    "udp".into(),
-                    json!([{"type": "salamander", "settings": {"password": obfs_password}}]),
-                );
-            }
-            if node.extra.contains_key("mport")
-                || node.extra.contains_key("upmbps")
-                || node.extra.contains_key("downmbps")
-            {
-                let mut quic = serde_json::Map::new();
-                if let Some(ports) = node.extra.get("mport") {
-                    quic.insert("udpHop".into(), json!({"ports": ports}));
-                }
-                if let Some(value) = node.extra.get("upmbps") {
-                    quic.insert("brutalUp".into(), json!(format!("{value} mbps")));
-                }
-                if let Some(value) = node.extra.get("downmbps") {
-                    quic.insert("brutalDown".into(), json!(format!("{value} mbps")));
-                }
-                finalmask.insert("quicParams".into(), Value::Object(quic));
-            }
-            if !finalmask.is_empty() {
-                stream["finalmask"] = Value::Object(finalmask);
-            }
             json!({
                 "tag": "proxy",
                 "protocol": "hysteria",
@@ -290,7 +256,127 @@ fn render_stream(node: &Node) -> Result<Value> {
             "legacy seed cannot be mapped to the current Xray transport schema".into(),
         ));
     }
+    if let Some(finalmask) = render_finalmask(node)? {
+        stream["finalmask"] = finalmask;
+    }
     Ok(stream)
+}
+
+fn render_finalmask(node: &Node) -> Result<Option<Value>> {
+    let mut finalmask = match node.extra.get("fm") {
+        Some(encoded) => match serde_json::from_str::<Value>(encoded) {
+            Ok(Value::Object(object)) => object,
+            Ok(_) => {
+                return Err(ManagerError::Validation(
+                    "FinalMask fm must be a JSON object".into(),
+                ));
+            }
+            Err(error) => {
+                return Err(ManagerError::Validation(format!(
+                    "invalid FinalMask fm JSON: {error}"
+                )));
+            }
+        },
+        None => serde_json::Map::new(),
+    };
+
+    if let Some(fragment) = node.extra.get("fragment") {
+        let mut fields = fragment.split(',');
+        let length = fields.next();
+        let delay = fields.next();
+        let packets = fields.next();
+        if fields.next().is_some()
+            || !length.is_some_and(is_numeric_range)
+            || !delay.is_some_and(is_numeric_range)
+            || packets != Some("tlshello")
+        {
+            return Err(ManagerError::Validation(
+                "fragment must use length,delay,tlshello".into(),
+            ));
+        }
+        push_finalmask(
+            &mut finalmask,
+            "tcp",
+            json!({
+                "type": "fragment",
+                "settings": {
+                    "length": length,
+                    "delay": delay,
+                    "packets": packets
+                }
+            }),
+        )?;
+    }
+
+    // Some subscription producers include both the authoritative `fm` JSON
+    // and legacy Hysteria aliases for older clients. Applying both would stack
+    // the same Salamander/QUIC mask twice and make the connection unusable.
+    if node.protocol == Protocol::Hysteria2 && !node.extra.contains_key("fm") {
+        if node
+            .extra
+            .get("obfs")
+            .is_some_and(|value| value == "salamander")
+        {
+            let obfs_password = node
+                .extra
+                .get("obfs-password")
+                .ok_or_else(|| ManagerError::Validation("missing obfs-password".into()))?;
+            push_finalmask(
+                &mut finalmask,
+                "udp",
+                json!({"type": "salamander", "settings": {"password": obfs_password}}),
+            )?;
+        }
+        if node.extra.contains_key("mport")
+            || node.extra.contains_key("upmbps")
+            || node.extra.contains_key("downmbps")
+        {
+            let quic = finalmask
+                .entry("quicParams")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| {
+                    ManagerError::Validation("FinalMask quicParams must be an object".into())
+                })?;
+            if let Some(ports) = node.extra.get("mport") {
+                quic.entry("udpHop")
+                    .or_insert_with(|| json!({"ports": ports}));
+            }
+            if let Some(value) = node.extra.get("upmbps") {
+                quic.entry("brutalUp")
+                    .or_insert_with(|| json!(format!("{value} mbps")));
+            }
+            if let Some(value) = node.extra.get("downmbps") {
+                quic.entry("brutalDown")
+                    .or_insert_with(|| json!(format!("{value} mbps")));
+            }
+        }
+    }
+
+    Ok((!finalmask.is_empty()).then_some(Value::Object(finalmask)))
+}
+
+fn push_finalmask(
+    finalmask: &mut serde_json::Map<String, Value>,
+    direction: &str,
+    mask: Value,
+) -> Result<()> {
+    finalmask
+        .entry(direction)
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| ManagerError::Validation(format!("FinalMask {direction} must be an array")))?
+        .push(mask);
+    Ok(())
+}
+
+fn is_numeric_range(value: &str) -> bool {
+    let mut bounds = value.split('-');
+    let start = bounds.next();
+    let end = bounds.next();
+    bounds.next().is_none()
+        && start.is_some_and(|value| value.parse::<u32>().is_ok())
+        && end.is_some_and(|value| value.parse::<u32>().is_ok())
 }
 
 fn normalize_network(network: &str) -> &str {

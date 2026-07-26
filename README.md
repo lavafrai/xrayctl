@@ -79,11 +79,26 @@ xrayctl status
 
 The default no-argument command opens the TUI. Probes run concurrently, `/`
 filters without reordering rows, `s` explicitly sorts by latency, and Enter
-validates and activates the highlighted node:
+validates and activates the highlighted node. A failed probe or activation is
+shown in the status panel and does not close the TUI:
 
 ```bash
 sudo xrayctl
 ```
+
+Manager diagnostics are written separately from Xray output, so temporary
+probe processes cannot overwrite the TUI. On Linux the persistent manager log
+is `/var/log/xray-manager/xrayctl.log`; raw Xray service logs are shown only
+when explicitly requested:
+
+```bash
+sudo xrayctl --verbose doctor
+sudo tail -n 200 /var/log/xray-manager/xrayctl.log
+sudo xrayctl service logs --lines 100
+```
+
+Use `--log-file <path>` or `XRAY_MANAGER_LOG=<path>` to select another manager
+log. `--no-color` disables ANSI colors and `--json` remains machine-readable.
 
 Selective application routing requires an active TUN policy. A command supplied
 after `--` does not need a saved profile:
@@ -158,9 +173,17 @@ See [backend development](docs/backends.md) for the extension contract.
 - Shadowsocks SIP002 is supported without plugins. Known and unknown
   `plugin=` values remain visible with a warning and are refused at activation
   instead of being silently ignored.
-- Hysteria2 nodes with unmappable parameters remain visible as partial or
+- FinalMask `fm` JSON is supported for VLESS and Hysteria2. Legacy
+  `fragment=length,delay,tlshello` is mapped to Xray's TCP FinalMask. If a
+  Hysteria2 share contains both `fm` and legacy `obfs` aliases, `fm` is
+  authoritative so the same Salamander mask is never applied twice.
+- Hysteria2 nodes with genuinely unmappable parameters remain visible as
   unsupported. A node is activated only after the candidate passes the real
   `xray run -test`; a failed candidate leaves the active generation unchanged.
+- Candidate validation uses a disposable copy without the TUN inbound because
+  Xray initializes TUN even in `run -test`. The committed config retains TUN;
+  service restart plus the proxied healthcheck validate the real runtime and
+  trigger rollback on failure.
 
 ## Security boundaries
 

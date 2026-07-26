@@ -16,6 +16,8 @@ pub struct Cli {
     pub quiet: bool,
     #[arg(long, global = true)]
     pub verbose: bool,
+    #[arg(long, global = true, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
     #[arg(long, global = true)]
     pub dry_run: bool,
     #[arg(long, global = true)]

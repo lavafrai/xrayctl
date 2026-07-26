@@ -29,6 +29,8 @@ pub fn parse_vless(uri: &str, subscription: &str) -> Result<Node> {
         "mode",
         "headerType",
         "seed",
+        "fragment",
+        "fm",
     ]
     .into_iter()
     .collect();
@@ -51,6 +53,22 @@ pub fn parse_vless(uri: &str, subscription: &str) -> Result<Node> {
     }
     if query.contains_key("seed") {
         warnings.push("legacy seed cannot be mapped to the current Xray transport schema".into());
+    }
+    if query
+        .get("fragment")
+        .is_some_and(|value| !is_supported_fragment(value))
+    {
+        warnings.push(
+            "fragment must use the length,delay,packets form supported by Xray FinalMask".into(),
+        );
+    }
+    if let Some(finalmask) = query.get("fm")
+        && !matches!(
+            serde_json::from_str::<serde_json::Value>(finalmask),
+            Ok(serde_json::Value::Object(_))
+        )
+    {
+        warnings.push("fm must be a JSON object".into());
     }
     let transport = Transport {
         kind: query.get("type").cloned().unwrap_or_else(|| "tcp".into()),
@@ -89,4 +107,24 @@ pub fn parse_vless(uri: &str, subscription: &str) -> Result<Node> {
             extra: query,
         },
     )
+}
+
+fn is_supported_fragment(value: &str) -> bool {
+    let mut fields = value.split(',');
+    let length = fields.next();
+    let delay = fields.next();
+    let packets = fields.next();
+    fields.next().is_none()
+        && length.is_some_and(is_numeric_range)
+        && delay.is_some_and(is_numeric_range)
+        && packets.is_some_and(|value| matches!(value, "tlshello"))
+}
+
+fn is_numeric_range(value: &str) -> bool {
+    let mut bounds = value.split('-');
+    let start = bounds.next();
+    let end = bounds.next();
+    bounds.next().is_none()
+        && start.is_some_and(|value| value.parse::<u32>().is_ok())
+        && end.is_some_and(|value| value.parse::<u32>().is_ok())
 }
